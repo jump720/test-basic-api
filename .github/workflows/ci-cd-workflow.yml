@@ -1,0 +1,120 @@
+name: API Workflow
+run-name: ${{ github.actor }}  Running API pipeline
+env:
+  APP_NAME: web-api-rest
+  APP_VERSION: ${{ github.sha }}
+  ECR_URI: ${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_DEFAULT_REGION }}.amazonaws.com
+  AWS_DEFAULT_REGION: ${{ vars.AWS_DEFAULT_REGION }}
+  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+  DOTNET_VERSION: 7.x
+on: [workflow_call]
+jobs:
+  # Installs dependencies
+  Restore:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v3
+      - name: Setup .NET Core SDK ${{ env.DOTNET_VERSION }}
+        uses: actions/setup-dotnet@v3
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+      - name: Restore cache
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.nuget/packages
+            src/**/obj/
+          key: ${{ runner.os }}-net-dependencies-${{ hashFiles('**/packages.lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-net-dependencies
+      - name: Install Dependencies
+        run: dotnet restore --locked-mode
+        working-directory: src/TestProject.WebApi
+      - name: Store dependencies cache
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.nuget/packages
+            src/**/obj/
+          key: ${{ runner.os }}-net-dependencies-${{ hashFiles('**/packages.lock.json') }}
+
+  # Builds the application and Check linting
+  Build:
+    runs-on: ubuntu-latest
+    needs: Restore
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v3
+      - name: Setup .NET Core SDK ${{ env.DOTNET_VERSION }}
+        uses: actions/setup-dotnet@v3
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+      - name: Restore cache
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.nuget/packages
+            src/**/obj/
+          key: ${{ runner.os }}-net-dependencies-${{ hashFiles('**/packages.lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-net-dependencies
+      - name: Build Project
+        run: dotnet build --configuration Release --no-restore
+        working-directory: src/TestProject.WebApi
+      - name: Install dotnet-format
+        run: dotnet tool install -g dotnet-format
+      - name: Run Dotnet Format
+        run: dotnet-format --no-restore --check
+        working-directory: src/TestProject.WebApi
+
+  # Builds docker image for application version and pushes to ECR
+  Build-Image:
+    runs-on: ubuntu-latest
+    container: docker:20.10.14
+    needs: Build
+    if: github.ref == 'refs/heads/main'
+    services:
+      docker:
+        image: docker:dind
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v3
+      - name: Install Tools
+        run: |
+          apk add --no-cache curl jq python3 py-pip
+          pip install awscli
+      - name: Login AWS
+        run: |
+          aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | docker login --username AWS --password-stdin ${ECR_URI}
+      - name: Build Image
+        run: |
+          docker build . -t ${ECR_URI}/${APP_NAME}-ecr:${APP_VERSION}
+          docker push ${ECR_URI}/${APP_NAME}-ecr:${APP_VERSION}
+
+  Create-Version:
+    runs-on: ubuntu-latest
+    container: python:3.10.4
+    needs: Build-Image
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v3
+      - name: Install Tools
+        run: |
+          pip install awscli
+          apt-get update
+          apt-get install zip
+      - name: Create Container Definition
+        run: |
+          sed -i "s/APPLICATION_VERSION_IMAGE/${ECR_URI}\/${APP_NAME}-ecr:${APP_VERSION}/g" docker-compose.yml
+          zip ${APP_VERSION}.zip docker-compose.yml
+      - name: Create App Version
+        run: |
+          aws s3 cp ${APP_VERSION}.zip s3://${APP_NAME}-eb-application-bundles/
+          aws elasticbeanstalk create-application-version --application-name ${APP_NAME}-api --version-label ${APP_VERSION} --source-bundle S3Bucket="${APP_NAME}-eb-application-bundles",S3Key="${APP_VERSION}.zip"
+      - name: Deploy DEV version to EBS
+        run: |
+          aws elasticbeanstalk update-environment --application-name ${APP_NAME}-api --environment-name ${APP_NAME}-dev-api --version-label ${APP_VERSION}
+

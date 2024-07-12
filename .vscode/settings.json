@@ -1,0 +1,8 @@
+{
+  "cSpell.words": ["flyctl", "Npgsql", "Serilog"],
+  "dotnet.defaultSolution": "src/TestProjectsln",
+
+  "omnisharp.enableMsBuildLoadProjectsOnDemand": true,
+  "omnisharp.enableEditorConfigSupport": true
+}
+
